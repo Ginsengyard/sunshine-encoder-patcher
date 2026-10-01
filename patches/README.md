@@ -9,6 +9,7 @@
 | 1 | `src/video.cpp` | `*_mf` 编解码器：请求超过 **1920 px** 时按比例钳制；最多尝试 **6** 次、失败间隔 **250ms**（吸收 MFT"打火"） | 平台无关，通用 |
 | 2 | `src/main.cpp` | 进程启动时持有一个 MF 平台引用，使 mfenc 的 `MFStartup`/`MFShutdown` 循环不会重置 MFT 的"已打火"状态 | Windows，通用 |
 | 3 | `src/platform/windows/display_vram.cpp` | Intel adapter 的能力白名单放行 `*_mf`（1 行） | Intel 特例 |
+| 4 | `src/video.cpp` | 给**删掉了 MF 编码器的 fork**（如 foundation-sunshine）补回 `mediafoundation` 编码器定义并注册进编码器列表；已有它的 fork（上游、Apollo）会自动跳过 | 仅对缺 MF 的 fork 生效 |
 
 ## 本机实测结论（ThinkPad E531 / HD 4000 / 驱动 10.18.10.5161）
 
