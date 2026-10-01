@@ -131,3 +131,60 @@ const int max_retries = mf_codec ? 6 : 2;
 - ffmpeg CLI 首次调用就能成功，和探针/Sunshine 的表现不同，还没有逐位解释。
   可能与其他组件先创建过 MF 对象有关，但它不影响本次修复的有效性。
 - 长时间稳定性（连续几十次会话的软编回退率）还在观察中。
+
+## 6. foundation-sunshine：为什么还要第 4 处补丁，以及一个交互坑
+
+### 6.1 它把 MF 编码器整块删掉了
+
+foundation-sunshine（AlkaidLab）的 `src/video.cpp` 里**没有任何 `*_mf` 编解码器**（代码搜索 `h264_mf` 为 0 结果），
+编码器列表是 nvenc → vulkan → quicksync → amdvce → software。实地安装后的启动日志证实了这一点：
+
+```
+Trying encoder [nvenc] → [vulkan] → [quicksync]（h264_qsv 失败：gen7 被 oneVPL 拒）
+Trying encoder [amdvce] → [software] → Found H.264 encoder: libx264 [software]
+```
+
+于是前 3 处补丁对它无效 —— `h264_mf` 连候选都进不去。第 4 处补丁把上游的 `encoder_t mediafoundation`
+（`av1_mf` / `hevc_mf` / `h264_mf` + `hw_encoding=1`、`rate_control=cbr`、`scenario=display_remoting`、
+D3D11 输入 + `dxgi_init_avcodec_hardware_input_buffer`）插回 `src/video.cpp`，并注册进编码器列表。
+目标 fork 若已有这一块（上游 Sunshine、Apollo），脚本自动跳过。
+
+补完后的实机启动探测（安装版）：
+
+```
+Trying encoder [mediafoundation]
+Creating encoder [h264_mf] → MFT name: 'Intel QSV Video H.264 Encoder MFT'
+Error: could not set output type (MF_E_INVALIDMEDIATYPE)   ← 第 1 次：打火
+Retrying h264_mf (attempt 2/6) after error                 ← 第 2 次：成功
+Found H.264 encoder: h264_mf [mediafoundation]
+```
+
+### 6.2 交互坑：显示自动切换失败会把 MFT 拖进坏状态
+
+foundation-sunshine 新增了「按客户端分辨率自动切换宿主显示」（`display_device_prep`）与虚拟显示器（VDD）集成。
+当客户端请求的模式在 VDD 上不存在时（默认 `vdd_settings.xml` 只有 800x600 / 1366x768 / 1920x1080 /
+2560x1440 / 3840x2160，而手机端常按屏幕原生 2400x1080 请求），日志是：
+
+```
+Failed to change display modes using Windows recommended modes, trying to set modes more strictly!
+Error: failed to set display mode!
+Error: Failed to configure display: Failed to set new display modes (resolution + refresh rate)
+Warning: Display configuration failed; continuing with current display settings if encoder probing succeeds
+```
+
+紧接着的编码器探测出现**连续 12 次** `MF_E_INVALIDMEDIATYPE`（JPEG / MPEG 两轮各 6 次全败），
+远超平时 1–2 次的"打火"，最终 `Encoder [mediafoundation] failed` → 回退 libx264。
+
+对比：客户端请求 1920x1080 时（VDD 有该模式）切换成功，探测第 2 次就通过，硬编正常。
+
+规避二选一（都不需要改代码）：
+
+1. `display_device_prep = disabled` —— 宿主保持当前分辨率，交给 GPU 放大后再编码；
+2. 在 `vdd_settings.xml` 的 `<resolutions>` 里补上客户端常用的分辨率。
+
+### 6.3 机制上的推测
+
+失败的显示模式设置会把 DXGI/驱动侧留在中间状态，Intel MFT 在短时间内拿不到可用的编码会话，
+"打火"失败窗口从 1–2 次被拉长到十几次。我们的重试上限（6 次 / 250ms）是按正常"打火"标定的，
+对付这种被拖坏的状态仍不够 —— 这也解释了为什么该场景最终回退软编，而不是被钳制救回来
+（钳制只处理"分辨率超出硬件能力"，而这里的探测分辨率仍在 1920 以内，钳制压根不触发）。
