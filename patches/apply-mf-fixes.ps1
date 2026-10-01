@@ -187,6 +187,104 @@ else {
     $results += Say 'src/platform/windows/display_vram.cpp' $(if ($Check) { 'would-apply' } else { 'applied' }) ''
 }
 
+# ---------------------------------------------------------------------------
+# 4. src/video.cpp - add the Media Foundation encoder entry (forks that dropped it)
+#
+# Some forks removed the MF encoder entirely (foundation-sunshine ships without a
+# single *_mf codec), so fixes 1-3 would have nothing to drive.  This inserts the
+# encoder definition and registers it in the encoder list.  Forks that still have
+# it (upstream Sunshine, Apollo) are detected and skipped.
+# ---------------------------------------------------------------------------
+$f = Join-Path $Repo 'src/video.cpp'
+$t = Read-Text $f
+if ($t.Contains('mediafoundation')) {
+    $results += Say 'src/video.cpp (MF encoder)' 'already-applied' ''
+}
+else {
+    $listOld = "#ifdef _WIN32`n    &quicksync,`n    &amdvce,`n#endif"
+    $defAnchor = '  encoder_t software {'
+    if ((Count-Of $t $listOld) -ne 1 -or (Count-Of $t $defAnchor) -ne 1) {
+        $results += Say 'src/video.cpp (MF encoder)' 'anchor-missing' "list=$(Count-Of $t $listOld) def=$(Count-Of $t $defAnchor)"
+    }
+    else {
+        $def = @(
+            '#ifdef _WIN32',
+            '  /**',
+            '   * @brief Media Foundation (Windows).',
+            '   *',
+            '   * On legacy Intel GPUs (Ivy Bridge / HD 4000 and similar) this is the only',
+            '   * working hardware path: oneVPL refuses those generations, while the Intel',
+            '   * Media Foundation H.264 MFT is still shipped by the driver.',
+            '   */',
+            '  encoder_t mediafoundation {',
+            '    "mediafoundation"sv,',
+            '    std::make_unique<encoder_platform_formats_avcodec>(',
+            '      AV_HWDEVICE_TYPE_D3D11VA,',
+            '      AV_HWDEVICE_TYPE_NONE,',
+            '      AV_PIX_FMT_D3D11,',
+            '      AV_PIX_FMT_NV12,  // SDR 4:2:0 8-bit',
+            '      AV_PIX_FMT_NONE,  // No HDR - the MF MFT only takes 8-bit',
+            '      AV_PIX_FMT_NONE,  // No YUV444 SDR',
+            '      AV_PIX_FMT_NONE,  // No YUV444 HDR',
+            '      dxgi_init_avcodec_hardware_input_buffer',
+            '    ),',
+            '    {',
+            '      // Common options for AV1',
+            '      {',
+            '        {"hw_encoding"s, 1},',
+            '        {"rate_control"s, "cbr"s},',
+            '        {"scenario"s, "display_remoting"s},',
+            '      },',
+            '      {},  // SDR-specific options',
+            '      {},  // HDR-specific options',
+            '      {},  // YUV444 SDR-specific options',
+            '      {},  // YUV444 HDR-specific options',
+            '      {},  // Fallback options',
+            '      "av1_mf"s,',
+            '      {},  // capabilities',
+            '    },',
+            '    {',
+            '      // Common options for HEVC',
+            '      {',
+            '        {"hw_encoding"s, 1},',
+            '        {"rate_control"s, "cbr"s},',
+            '        {"scenario"s, "display_remoting"s},',
+            '      },',
+            '      {},  // SDR-specific options',
+            '      {},  // HDR-specific options',
+            '      {},  // YUV444 SDR-specific options',
+            '      {},  // YUV444 HDR-specific options',
+            '      {},  // Fallback options',
+            '      "hevc_mf"s,',
+            '      {},  // capabilities',
+            '    },',
+            '    {',
+            '      // Common options for H.264',
+            '      {',
+            '        {"hw_encoding"s, 1},',
+            '        {"rate_control"s, "cbr"s},',
+            '        {"scenario"s, "display_remoting"s},',
+            '      },',
+            '      {},  // SDR-specific options',
+            '      {},  // HDR-specific options',
+            '      {},  // YUV444 SDR-specific options',
+            '      {},  // YUV444 HDR-specific options',
+            '      {},  // Fallback options',
+            '      "h264_mf"s,',
+            '      {},  // capabilities',
+            '    },',
+            '    PARALLEL_ENCODING',
+            '  };',
+            '#endif',
+            ''
+        ) -join "`n"
+        $t2 = $t.Replace($defAnchor, $def + $defAnchor)
+        $t2 = $t2.Replace($listOld, $listOld.Replace('#endif', "    &mediafoundation,`n#endif"))
+        if (-not $Check) { Write-Text $f $t2 }
+        $results += Say 'src/video.cpp (MF encoder)' $(if ($Check) { 'would-apply' } else { 'applied' }) ''
+    }
+}
+
 $results
 ''
 "repo: $Repo   mode: $(if ($Check) { 'check only' } else { 'applied' })"
