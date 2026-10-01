@@ -84,6 +84,7 @@ MFT 对宽或高超过 **1920** 的输出类型直接拒收（下表为实测）
 | 1 | `src/platform/windows/display_vram.cpp` | Intel 分支的白名单加 `*_mf`（1 行） | 让 `h264_mf` 通过能力判定 |
 | 2 | `src/main.cpp` | 进程启动时保留一个 MF 平台引用（`MFStartup` 一次，不配对 `MFShutdown`） | 让 `mfenc` 自己的 `MFStartup`/`MFShutdown` 不会拆掉平台，"打火"状态得以保留 |
 | 3 | `src/video.cpp` | `*_mf` 编解码器：请求超过 1920 时按比例钳制重试；最多尝试 6 次、失败间隔 250ms | 把硬件的能力上限变成"自动降级"，并把"打火"失败吸收在重试里 |
+| 4 | `src/video.cpp` | 给**删掉了 MF 编码器的 fork**（如 foundation-sunshine）补回 `mediafoundation` 编码器定义并注册进编码器列表 | 那些 fork 里根本不存在 `*_mf`，前 3 处无从生效 |
 
 第 3 处只在 `*_mf` 上生效，且**只在真实打开失败后**才钳制，其他编码器（NVENC / AMF / QSV / 软编）行为完全不变。
 
@@ -98,6 +99,36 @@ MFT 对宽或高超过 **1920** 的输出类型直接拒收（下表为实测）
 | **2400x1080（手机端）** | **连续失败 ~199 次，会话起不来** | 自动降级为 **1920x864** 后正常出画面，日志：<br>`Warning: h264_mf: requested 2400x1080 exceeds the 1920 pixel Media Foundation encoder limit, using 1920x864 instead` |
 
 钳制后的分辨率保持客户端的长宽比（2400x1080 → 1920x864），且取偶数。
+
+### foundation-sunshine 上的额外一步，以及一个坑
+
+**额外一步（第 4 处补丁）**：foundation-sunshine（AlkaidLab）把 Media Foundation 编码器**整块删掉了**
+（全仓库搜不到 `h264_mf`），探测会直接落到 libx264。所以对它必须先补回 `mediafoundation` 编码器，
+前 3 处才有作用对象。脚本会自动检测：缺就补，已有（上游 Sunshine、Apollo）就跳过。
+
+**一个坑（他们的新功能）**：foundation-sunshine 增加了「按客户端分辨率自动切换宿主显示」。
+当目标模式在虚拟显示器上不存在时（例如手机端请求 2400x1080，而 VDD 默认只提供
+800x600 / 1366x768 / 1920x1080 / 2560x1440 / 3840x2160），模式切换失败后会把 Intel MFT
+拖进坏状态——随后的编码器探测出现**连续 12 次** `MF_E_INVALIDMEDIATYPE`（平时"打火"只需 1–2 次），
+最终整块探测失败、回退软件编码。
+
+规避二选一：
+
+- 把 `display_device_prep` 改为 `disabled`（宿主保持当前分辨率，由 GPU 放大后编码）；或
+- 在 `vdd_settings.xml` 的 `<resolutions>` 里给虚拟显示器补上该分辨率。
+
+1920x1080 不受影响（VDD 有该模式，切换成功 → 硬编正常）。
+
+**实测（foundation-sunshine，安装版）**：
+
+```
+Trying encoder [mediafoundation]
+Creating encoder [h264_mf] → MFT name: 'Intel QSV Video H.264 Encoder MFT'
+Error: could not set output type (MF_E_INVALIDMEDIATYPE)     ← 打火
+Retrying h264_mf (attempt 2/6) after error                   ← 重试补丁
+MFT name: 'Intel QSV Video H.264 Encoder MFT'（成功）
+Found H.264 encoder: h264_mf [mediafoundation]               ← 选定硬编
+```
 
 ---
 
