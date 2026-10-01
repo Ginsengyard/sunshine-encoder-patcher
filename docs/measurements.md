@@ -137,7 +137,48 @@ round5 OK
 | 客户端 | Moonlight 安卓端（2400x1080 屏） |
 | 对照 | ffmpeg CLI 直调 `h264_mf`（同机、同分辨率可正常编码） |
 
-## 8. 检查工具输出样例
+## 8. foundation-sunshine 安装版实测
+
+服务端换成 foundation-sunshine（AlkaidLab）`manual-20261001-111805-dev`（= 分支 commit `02774b0`：
+补回 MF 编码器 + 三处补丁），用 Inno Setup 安装包升级安装；`SunshineService` 自启，配置保留。
+
+### 8.1 补丁前：探测直接落到软件编码
+
+```
+Trying encoder [nvenc] → [vulkan] → [quicksync]（h264_qsv 失败：gen7）
+Trying encoder [amdvce] → [software] → Found H.264 encoder: libx264 [software]
+```
+
+他们的编码器列表里没有 `mediafoundation`，所以连尝试都不会发生。
+
+### 8.2 补丁后：1920x1080 会话走硬编
+
+```
+Trying encoder [mediafoundation]
+Creating encoder [h264_mf] → MFT name: 'Intel QSV Video H.264 Encoder MFT'
+Error: could not set output type (MF_E_INVALIDMEDIATYPE)   ← 第 1 次：打火
+Retrying h264_mf (attempt 2/6) after error                 ← 第 2 次：成功
+…
+Found H.264 encoder: h264_mf [mediafoundation]
+```
+
+### 8.3 2400x1080 会话：显示自动切换失败 → MFT 被拖坏 → 软编
+
+```
+21:44:41  Failed to set new display modes (resolution + refresh rate)   ← VDD 没有 2400x1080 模式
+21:44:42  Creating encoder [h264_mf] → MF_E_INVALIDMEDIATYPE
+          Retrying h264_mf (attempt 2/6 … 6/6)   —— 6 次全败
+21:44:45  第二轮（Color range: MPEG）同样 6/6 全败
+21:44:48  Encoder [mediafoundation] failed → Found H.264 encoder: libx264 [software]
+21:44:48  Client requested stream resolution (clientViewport): 2400x1080
+21:44:48  Initial display: 1366x768, encoding: 2400x1080, scale: 1.75695x1.40625   ← 软编 2400x1080
+```
+
+对照 1920x1080：VDD 有该模式 → 显示切换成功 → 探测第 2 次通过 → 硬编。
+
+规避见 `mf-hwenc-fix.md` §6.2（`display_device_prep = disabled`，或给 VDD 补该分辨率）。
+
+## 9. 检查工具输出样例
 
 ```
 $ tools\check-encoder.cmd
