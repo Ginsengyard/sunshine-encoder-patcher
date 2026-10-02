@@ -131,7 +131,7 @@ round5 OK
 |---|---|
 | 机器 | ThinkPad E531（muxless Optimus） |
 | CPU / 核显 | i7-3740QM / Intel HD Graphics 4000，驱动 10.18.10.5161 |
-| 独显 | NVIDIA GT 740M，驱动 418.91（NVENC API 9.0，Sunshine 要求 ≥11.0，不可用） |
+| 独显 | NVIDIA GT 740M，驱动 418.91（NVENC API 9.0；Sunshine 内不可用，边界见 §10） |
 | 系统 | Windows 10 专业版 22H2（19045.7725） |
 | 服务端 | Sunshine `master` 基线 4429acd0 + 本仓库三处补丁 |
 | 客户端 | Moonlight 安卓端（2400x1080 屏） |
@@ -194,3 +194,64 @@ Sunshine 编码器检查   2026-09-29 21:50:50
 
 最近一次（2026-09-29 21:15:28）：h264_mf — 硬编 (MF)
 ```
+
+## 10. NVIDIA 侧：NVENC 与 Media Foundation（边界实测）
+
+同机采集（环境见 §7）。这一节回答两个问题：NVIDIA 的 NVENC 在这台机器上到底能不能用、
+为什么 Sunshine 的两条 NVIDIA 路线（`h264_nvenc` / `h264_mf`）都走不通。
+
+### 10.1 NVENC 可用：ffmpeg 的 D3D11 直通路径
+
+ffmpeg 默认用 **CUDA 设备**打开 nvenc，在这台机器上初始化失败：
+
+```
+[h264_nvenc @ …] Cannot init CUDA
+Error initializing output stream 0:0
+```
+
+换用**不经过 CUDA 的 D3D11 直通**（在 NVIDIA 适配器上创建 D3D11 设备，帧经 `hwupload`
+变成 D3D11 纹理直接喂给 nvenc）则可以正常硬编（ffmpeg 4.1.4，该版本尚未强制 NVENC API ≥ 11）：
+
+```bash
+# <name> 为设备别名，<nvidia-adapter-index> 为该机上 NVIDIA 适配器的序号
+ffmpeg -init_hw_device d3d11va=<name>:<nvidia-adapter-index> -filter_hw_device <name> \
+  -f lavfi -i color=c=black:s=1280x720:r=30:d=1 \
+  -vf "format=nv12,hwupload" -c:v h264_nvenc -y out.mp4
+```
+
+实测输出 `frame= 30 … speed=2.93x`，成功产出视频文件。**NVENC 硬件与驱动正常。**
+
+### 10.2 NVIDIA H.264 Encoder MFT：在所有条件下都无法实例化
+
+- 枚举正常：`MFTEnumEx`（HARDWARE + H264）能拿到 `NVIDIA H.264 Encoder MFT`
+  （CLSID `{60F44560-5A20-4857-BFEF-D29773CB8040}`）；
+- 实例化恒失败：`ActivateObject` / `IClassFactory.CreateInstance` 一律
+  `0x8000FFFF`（E_UNEXPECTED）。独立 PowerShell、提权脚本、独立探针进程结论一致。
+
+按「给它补一块显示器」这一已知方向逐级加条件（虚拟显示器绑定到 NVIDIA）：
+
+| 条件 | CreateInstance |
+|---|---|
+| 虚拟显示设备重启（配置已切到 NVIDIA） | ❌ `0x8000FFFF` |
+| 再用 `DisplaySwitch /extend` 点亮虚拟屏（活动显示器） | ❌ `0x8000FFFF` |
+| 再把虚拟屏设为**主显示器**（已确认 `Primary=True`） | ❌ `0x8000FFFF` |
+
+### 10.3 结构性原因：NVIDIA 适配器没有任何显示输出
+
+DXGI 逐适配器枚举输出：
+
+| 适配器 | 输出数 |
+|---|---|
+| Intel HD Graphics 4000 | 2（物理屏 + 虚拟屏） |
+| NVIDIA GT 740M | **0**（`DXGI_ERROR_NOT_FOUND`） |
+
+muxless Optimus 机型上，显示器（包括虚拟显示器）在显示子系统里都挂在 Intel 的合成路径上，
+**不可能出现在 NVIDIA 适配器上**。NVIDIA MFT 的已知前置条件（显示器接在 NVIDIA 上）
+在这类机器上无法满足——失败是结构性的，与 VDD 绑定、桌面拓扑无关。
+
+### 10.4 结论（对 Sunshine 的影响）
+
+- `h264_mf` 永远选不到 NVIDIA MFT → 给 NVIDIA 分支放行 `*_mf` 没有意义，本仓库只改 Intel 分支。
+- `h264_nvenc` 被 ffmpeg 的 NVENC API 版本下限挡住（要求 ≥ 11.0；本机 9.0），
+  除非自制补丁版 ffmpeg——不在本仓库范围。
+- 串流继续用 Intel QSV（`h264_mf` + 本仓库三处补丁）；单独用 NVENC 时使用 §10.1 的命令。
