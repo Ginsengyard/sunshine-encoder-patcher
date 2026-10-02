@@ -24,14 +24,16 @@ function Pause-IfInteractive {
 }
 
 function Find-SunshineLog {
+    # 优先用真正安装的 Sunshine / foundation-sunshine（%ProgramFiles%\Sunshine\config），
+    # 找不到才退回本机测试用的 mfb_fix* 便携包。
+    $pf = Join-Path $env:ProgramFiles 'Sunshine\config\sunshine.log'
+    if (Test-Path $pf) { return $pf }
     $roots = @($PSScriptRoot, (Split-Path $PSScriptRoot -Parent)) | Where-Object { $_ }
     foreach ($r in $roots) {
         $hit = Get-ChildItem (Join-Path $r 'mfb_fix*\Sunshine\config\sunshine.log') -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($hit) { return $hit.FullName }
     }
-    $pf = Join-Path $env:ProgramFiles 'Sunshine\config\sunshine.log'
-    if (Test-Path $pf) { return $pf }
     return $null
 }
 
@@ -115,7 +117,15 @@ function Verdict($name, $plat) {
 
 Write-Host ''
 Write-Host "Sunshine 编码器检查   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
+$exe = Join-Path $env:ProgramFiles 'Sunshine\sunshine.exe'
+if (Test-Path $exe) {
+    $ei = Get-Item $exe
+    Write-Host ("程序：{0}" -f $exe) -ForegroundColor DarkGray
+    Write-Host ("      版本 {0}　安装/更新时间 {1}" -f $ei.VersionInfo.ProductVersion, $ei.LastWriteTime.ToString('yyyy-MM-dd HH:mm')) -ForegroundColor DarkGray
+}
+$logTime = (Get-Item -LiteralPath $Log).LastWriteTime.ToString('yyyy-MM-dd HH:mm')
 Write-Host "日志：$Log"
+Write-Host "      （最后写入 $logTime）" -ForegroundColor DarkGray
 if ($inSession) { Write-Host "状态：当前有会话进行中（$($last.Ts.Substring(11)) 起）" -ForegroundColor Cyan }
 Write-Host ''
 
