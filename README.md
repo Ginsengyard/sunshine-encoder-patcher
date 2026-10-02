@@ -197,13 +197,35 @@ tools\check-encoder.cmd      # 双击即可（读取 sunshine.log，不需要停
 
 ---
 
+## NVIDIA / NVENC 的边界（为什么本仓库只改 Intel）
+
+在**混合显卡（muxless Optimus）笔记本**上实测（原始数据见 `docs/measurements.md` §10）：
+
+- **NVENC 硬件本身可用**：ffmpeg 走 **D3D11 直通**路径可以正常硬编
+  （`-init_hw_device d3d11va=<设备名>:<显卡索引> -filter_hw_device <设备名>` +
+  `-vf "format=nv12,hwupload" -c:v h264_nvenc`）。默认的 CUDA 路径在部分老驱动上初始化失败，
+  换 D3D11 直通即可（实测 1280x720@30 完整编码出帧）。
+- **NVIDIA 的 H.264 Encoder MFT 在这类机器上无法实例化**：`IClassFactory.CreateInstance`
+  恒返回 `0x8000FFFF`（E_UNEXPECTED）。把虚拟显示器（VDD）绑到 NVIDIA、点亮它、
+  甚至把它设为「主显示器」后实测，全部依然失败——原因是结构性的：DXGI 枚举下
+  **NVIDIA 适配器没有任何显示输出**（0 个 output），物理屏与虚拟屏都在 Intel 的合成路径上，
+  MFT 的已知前置条件（显示器接在 NVIDIA 上）在这类机器上无法满足。
+- 因此本仓库**不给 NVIDIA 分支放行 `*_mf`**：`h264_mf` 到不了 NVIDIA MFT，放行只会带来
+  无谓的失败重试。三处补丁只针对 Intel 分支。
+- 让 Sunshine 用上 NVENC 需要替换为放宽 NVENC API 版本校验的定制 ffmpeg
+  （新版要求 API ≥ 11.0，而本机 / Kepler 移动版驱动上限是 9.x），不在本仓库范围内。
+
+需要 NVENC 时用上面的 ffmpeg D3D11 命令即可；串流维持 Intel QSV（`h264_mf` + 本仓库补丁）。
+
+---
+
 ## 验证环境
 
 | 项 | 值 |
 |---|---|
 | 机器 | ThinkPad E531（muxless Optimus） |
 | CPU / 核显 | i7-3740QM / Intel HD Graphics 4000，驱动 10.18.10.5161（独占所有显示输出） |
-| 独显 | NVIDIA GT 740M（驱动上限 418.91 → NVENC API 9.0，低于 Sunshine 要求的 11.0，不可用） |
+| 独显 | NVIDIA GT 740M（驱动 418.91 → NVENC API 9.0；Sunshine 内不可用，边界与实测见「NVIDIA / NVENC 的边界」） |
 | 系统 | Windows 10 专业版 22H2（19045.7725） |
 | 服务端 | Sunshine `master`（基线 4429acd0）+ 本仓库三处补丁，自编译 |
 | 客户端 | Moonlight（安卓端，2400x1080 屏） |
@@ -223,6 +245,11 @@ Measured on an HD 4000 (driver 10.18.10.5161): requests wider or taller than 192
 rejected with `MF_E_INVALIDMEDIATYPE` regardless of frame rate; bitrate is not a factor
 (1–120 Mbps accepted at 1080p60). After the fix, 720p / 1080p sessions encode with Intel QSV
 and a phone's 2400x1080 request is downgraded to 1920x864 instead of failing ~199 times.
+
+On the NVIDIA side (see docs/measurements.md §10): NVENC works through ffmpeg's D3D11
+device path, but NVIDIA's H.264 encoder MFT cannot be instantiated on muxless/hybrid
+laptops (the NVIDIA adapter exposes no display outputs), so the patches deliberately
+stay Intel-only.
 
 ## 许可
 
