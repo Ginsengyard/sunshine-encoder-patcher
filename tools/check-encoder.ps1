@@ -3,13 +3,25 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File check-encoder.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File check-encoder.ps1 -Log <sunshine.log> -Count 15
 #
-# 也可直接双击同目录的 check-encoder.cmd。
+# 直接双击本 .ps1（或"使用 PowerShell 运行"）时，结尾会等回车，不会一闪而过；
+# 从脚本里调用可加 -NoPause 跳过等待。也可双击同目录的 check-encoder.cmd。
 #
 # 判据来自日志中的 "Found H.264 encoder: <name> [<platform>]"（每次串流前都会写一条）。
 param(
     [string]$Log,
-    [int]$Count = 10
+    [int]$Count = 10,
+    [switch]$NoPause
 )
+
+# 双击 / 手动运行时不要让窗口一闪而过（-NoPause 供 .cmd 与脚本调用）
+function Pause-IfInteractive {
+    if ($NoPause) { return }
+    if (-not [Environment]::UserInteractive) { return }
+    try { if ([Console]::IsInputRedirected) { return } } catch { return }
+    Write-Host ''
+    Write-Host '按回车键退出…' -ForegroundColor DarkGray -NoNewline
+    [void][Console]::ReadLine()
+}
 
 function Find-SunshineLog {
     $roots = @($PSScriptRoot, (Split-Path $PSScriptRoot -Parent)) | Where-Object { $_ }
@@ -26,6 +38,7 @@ function Find-SunshineLog {
 if (-not $Log) { $Log = Find-SunshineLog }
 if (-not $Log -or -not (Test-Path $Log)) {
     Write-Host "找不到 sunshine.log，请用 -Log <路径> 指定。" -ForegroundColor Red
+    Pause-IfInteractive
     exit 1
 }
 
@@ -41,6 +54,7 @@ try {
 catch {
     Write-Host "无法读取日志（可能被占用）：$($_.Exception.Message)" -ForegroundColor Red
     Write-Host '可以先停掉 Sunshine，或用 -Log 指定 sunshine.log.1 等历史文件。' -ForegroundColor DarkGray
+    Pause-IfInteractive
     exit 1
 }
 foreach ($line in $lines) {
@@ -52,22 +66,40 @@ foreach ($line in $lines) {
     if ($f.Success) {
         [void]$events.Add([pscustomobject]@{ Ts = $ts; Kind = 'encoder'; Name = $f.Groups['name'].Value; Plat = $f.Groups['plat'].Value })
     }
+    elseif ($msg -match 'exceeds the \d+ pixel .* using (?<w>\d+)x(?<h>\d+) instead') {
+        [void]$events.Add([pscustomobject]@{ Ts = $ts; Kind = 'clamp'; Text = "$($Matches['w'])x$($Matches['h'])" })
+    }
     elseif ($msg -match '^CLIENT CONNECTED') { [void]$events.Add([pscustomobject]@{ Ts = $ts; Kind = 'connected' }) }
     elseif ($msg -match '^CLIENT DISCONNECTED') { [void]$events.Add([pscustomobject]@{ Ts = $ts; Kind = 'disconnected' }) }
 }
 
 $sessions = New-Object System.Collections.ArrayList
 $pending = $null
+$pendingClamp = $null
 for ($i = 0; $i -lt $events.Count; $i++) {
     $e = $events[$i]
     if ($e.Kind -eq 'encoder') {
         $pending = $e
+        $pendingClamp = $null
+        continue
+    }
+    if ($e.Kind -eq 'clamp') {
+        if ($pending) { $pendingClamp = "降级 $($e.Text)" }
+        elseif ($sessions.Count) {
+            # 钳制警告发生在 CLIENT CONNECTED 之后：补挂到刚开的那个会话上
+            $lastSess = $sessions[$sessions.Count - 1]
+            if ($lastSess.Window -like '连接*' -and $lastSess.Window -notlike '*降级*') {
+                $lastSess.Window = "$($lastSess.Window)  降级 $($e.Text)"
+            }
+        }
         continue
     }
     if ($pending) {
         $window = if ($e.Kind -eq 'connected') { "连接 $($e.Ts.Substring(11))" } else { "断开 $($e.Ts.Substring(11))" }
+        if ($pendingClamp) { $window = "$window  $pendingClamp" }
         [void]$sessions.Add([pscustomobject]@{ Ts = $pending.Ts; Name = $pending.Name; Plat = $pending.Plat; Window = $window })
         $pending = $null
+        $pendingClamp = $null
     }
 }
 
@@ -89,6 +121,7 @@ Write-Host ''
 
 if (-not $sessions.Count) {
     Write-Host '日志里还没有串流记录（每次串流开始时会写一行 "Found H.264 encoder: ..."）。' -ForegroundColor DarkGray
+    Pause-IfInteractive
     exit 0
 }
 
@@ -118,3 +151,4 @@ if ($lastVerdict.Text -like '软编*') {
     Write-Host '提示：断开重连即可让 Sunshine 重新探测编码器（多数情况下第二次会拿到硬件编码器）。' -ForegroundColor Yellow
 }
 Write-Host ''
+Pause-IfInteractive
