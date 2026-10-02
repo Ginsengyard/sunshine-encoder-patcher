@@ -188,3 +188,21 @@ Warning: Display configuration failed; continuing with current display settings 
 "打火"失败窗口从 1–2 次被拉长到十几次。我们的重试上限（6 次 / 250ms）是按正常"打火"标定的，
 对付这种被拖坏的状态仍不够 —— 这也解释了为什么该场景最终回退软编，而不是被钳制救回来
 （钳制只处理"分辨率超出硬件能力"，而这里的探测分辨率仍在 1920 以内，钳制压根不触发）。
+
+## 7. 为什么不做 NVIDIA 分支的 `*_mf`
+
+一句话：**NVIDIA 的 H.264 Encoder MFT 在 muxless Optimus 机型上装不起来**，
+`h264_mf` 到不了 NVIDIA 的编码器，放行白名单没有意义。
+
+- `MFTEnumEx` 能枚举到 `NVIDIA H.264 Encoder MFT`，注册文件与驱动组件都正常；
+- 但 `ActivateObject` / `IClassFactory.CreateInstance` 恒返回 `0x8000FFFF`（E_UNEXPECTED），
+  独立进程 / 提权 / 多种桌面拓扑（含把虚拟显示器设为「主显示器」）下结论一致
+  （数据见 `measurements.md` §10）；
+- 原因是结构性的：DXGI 枚举下 **NVIDIA 适配器没有任何显示输出**（0 个 output），
+  物理屏与虚拟显示器都在 Intel 的合成路径上，MFT 的已知前置条件无法满足；
+- NVENC 本身没坏：ffmpeg 走 **D3D11 直通**可以正常硬编（`measurements.md` §10.1）；
+  它进不了 Sunshine 是新版 ffmpeg 的 NVENC API 版本下限（≥ 11.0，本机 9.0）所致，
+  属于「定制 ffmpeg 或换机器」的问题，不在本仓库范围内。
+
+因此三处补丁只针对 Intel 分支；若把白名单补丁扩大到 NVIDIA 分支，
+`h264_mf` 会通过能力判定、却在打开编码器时多出一串无谓的失败重试，只会拖慢回退。
